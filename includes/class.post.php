@@ -37,12 +37,11 @@ class ezTOC_Post {
 	private $headingLevels = array();
 
 	/**
-	 * The user defined strings to be used in the TOC in place of the post content headings.
-	 * @see ezTOC_Post::getAlternateHeadings()
+	 * Array of nodes that are excluded by class/id selector.
 	 * @since 2.0
-	 * @var array
+	 * @var string[]
 	 */
-	private $alternateHeadings = array();
+	private $excludedNodes = array();
 
 	/**
 	 * Keeps a track of used anchors for collision detecting.
@@ -55,13 +54,30 @@ class ezTOC_Post {
 	/**
 	 * @var bool
 	 */
-	private $hasTOCItems = FALSE;
+	private $hasTOCItems = false;
 
-	public function __construct( WP_Post $post ) {
+	/**
+	 * ezTOC_Post constructor.
+	 *
+	 * @since 2.0
+	 *
+	 * @param WP_Post $post
+	 * @param bool    $apply_content_filter Whether or not to apply the `the_content` filter on the post content.
+	 */
+	public function __construct( WP_Post $post, $apply_content_filter = true ) {
 
 		$this->post            = $post;
 		$this->permalink       = get_permalink( $post );
 		$this->queriedObjectID = get_queried_object_id();
+
+		if ( $apply_content_filter ) {
+
+			$this->applyContentFilter()->process();
+
+		} else {
+
+			$this->process();
+		}
 	}
 
 	/**
@@ -78,7 +94,7 @@ class ezTOC_Post {
 
 		if ( ! $post instanceof WP_Post ) {
 
-			return NULL;
+			return null;
 		}
 
 		return new static( $post );
@@ -89,12 +105,11 @@ class ezTOC_Post {
 	 *
 	 * This must be run after object init or after @see ezTOC_Post::applyContentFilter().
 	 *
-	 * @access public
 	 * @since  2.0
 	 *
 	 * @return static
 	 */
-	public function process() {
+	private function process() {
 
 		$this->processPages();
 
@@ -104,33 +119,62 @@ class ezTOC_Post {
 	/**
 	 * Apply `the_content` filter to the post content.
 	 *
-	 * @access public
 	 * @since  2.0
 	 *
 	 * @return static
 	 */
-	public function applyContentFilter() {
+	private function applyContentFilter() {
+
+		add_filter( 'strip_shortcodes_tagnames', array( __CLASS__, 'stripShortcodes' ), 10, 2 );
 
 		/*
 		 * Ensure the ezTOC content filter is not applied when running `the_content` filter.
 		 */
 		remove_filter( 'the_content', array( 'ezTOC', 'the_content' ), 100 );
 
+		$this->post->post_content = apply_filters( 'the_content', strip_shortcodes( $this->post->post_content ) );
+
+		add_filter( 'the_content', array( 'ezTOC', 'the_content' ), 100 );
+
+		remove_filter( 'strip_shortcodes_tagnames', array( __CLASS__, 'stripShortcodes' ) );
+
+		return $this;
+	}
+
+	/**
+	 * Callback for the `strip_shortcodes_tagnames` filter.
+	 *
+	 * Strip the shortcodes so their content is no processed for headings.
+	 *
+	 * @see ezTOC_Post::applyContentFilter()
+	 *
+	 * @since 2.0
+	 *
+	 * @param array  $tags_to_remove Array of shortcode tags to remove.
+	 * @param string $content        Content shortcodes are being removed from.
+	 *
+	 * @return array
+	 */
+	public static function stripShortcodes( $tags_to_remove, $content ) {
+
+		//error_log( var_export( $tags_to_remove, true ) );
+
 		/*
 		 * Ensure the ezTOC shortcodes are not processed when applying `the_content` filter
 		 * otherwise an infinite loop may occur.
 		 */
-		remove_shortcode( 'ez-toc' );
-		remove_shortcode( 'toc' );
+		$tags_to_remove = apply_filters(
+			'ez_toc_strip_shortcodes_tagnames',
+			array(
+				'ez-toc',
+				apply_filters( 'ez_toc_shortcode', 'toc' ),
+			),
+			$content
+		);
 
-		$this->post->post_content = apply_filters( 'the_content', $this->post->post_content );
+		//error_log( var_export( $tags_to_remove, true ) );
 
-		add_filter( 'the_content', array( 'ezTOC', 'the_content' ), 100 );
-
-		add_shortcode( 'ez-toc', array( 'ezTOC', 'shortcode' ) );
-		add_shortcode( apply_filters( 'ez_toc_shortcode', 'toc' ), array( 'ezTOC', 'shortcode' ) );
-
-		return $this;
+		return $tags_to_remove;
 	}
 
 	/**
@@ -186,7 +230,7 @@ class ezTOC_Post {
 	 */
 	protected function getNumberOfPages() {
 
-		 return count( $this->pages );
+		return count( $this->pages );
 	}
 
 	/**
@@ -210,6 +254,11 @@ class ezTOC_Post {
 	 */
 	private function processPages() {
 
+		//if ( ! class_exists( 'TagFilter' ) ) {
+		//
+		//	require_once( EZ_TOC_PATH . 'includes/vendor/ultimate-web-scraper/tag_filter.php' );
+		//}
+
 		$split = preg_split( '/<!--nextpage-->/msuU', $this->post->post_content );
 		$pages = array();
 
@@ -217,7 +266,43 @@ class ezTOC_Post {
 
 			$page = 1;
 
+			//$tagFilterOptions = TagFilter::GetHTMLOptions();
+
+			//// Set custom TagFilter options.
+			//$tagFilterOptions['charset'] = get_option( 'blog_charset' );
+			////$tagFilterOptions['output_mode'] = 'xml';
+
 			foreach ( $split as $content ) {
+
+				//$html = TagFilter::Explode( $content, $tagFilterOptions );
+				//
+				///**
+				// * @since 2.0
+				// *
+				// * @param $selectors array  Array of classes/id selector to exclude from TOC.
+				// * @param $content   string Post content.
+				// */
+				//$selectors = apply_filters( 'ez_toc_exclude_by_selector', array(), $content );
+				//
+				//$nodes = $html->Find( implode( ',', $selectors ) );
+				//
+				//foreach ( $nodes['ids'] as $id ) {
+				//
+				//	$html->Remove( $id );
+				//}
+				//
+				//$eligibleContent = $html->Implode( 0, $tagFilterOptions );
+				//
+				///**
+				// * TagFilter::Implode() writes br tags as `<br>` while WP normalizes to `<br />`.
+				// * Normalize `$eligibleContent` to match WP.
+				// *
+				// * @see wpautop()
+				// */
+				////$eligibleContent = str_replace( array( '<br>', '<br/>' ), array( '<br />' ), $eligibleContent );
+				//$eligibleContent = \Easy_Plugins\Table_Of_Contents\String\force_balance_tags( $eligibleContent );
+
+				$this->extractExcludedNodes( $page, $content );
 
 				$pages[ $page ] = array(
 					'headings' => $this->extractHeadings( $content ),
@@ -246,6 +331,56 @@ class ezTOC_Post {
 	}
 
 	/**
+	 * Extract nodes that heading are to be excluded.
+	 *
+	 * @since 2.0
+	 *
+	 * @param int    $page
+	 * @param string $content
+	 */
+	private function extractExcludedNodes( $page, $content ) {
+
+		if ( ! class_exists( 'TagFilter' ) ) {
+
+			require_once( EZ_TOC_PATH . 'includes/vendor/ultimate-web-scraper/tag_filter.php' );
+		}
+
+		$tagFilterOptions = TagFilter::GetHTMLOptions();
+
+		// Set custom TagFilter options.
+		$tagFilterOptions['charset'] = get_option( 'blog_charset' );
+		//$tagFilterOptions['output_mode'] = 'xml';
+
+		$html = TagFilter::Explode( $content, $tagFilterOptions );
+
+		/**
+		 * @since 2.0
+		 *
+		 * @param $selectors array  Array of classes/id selector to exclude from TOC.
+		 * @param $content   string Post content.
+		 */
+		$selectors = apply_filters( 'ez_toc_exclude_by_selector', array(), $content );
+
+		$nodes = $html->Find( implode( ',', $selectors ) );
+
+		foreach ( $nodes['ids'] as $id ) {
+
+			//$this->excludedNodes[ $page ][ $id ] = $html->Implode( $id, $tagFilterOptions );
+			array_push( $this->excludedNodes, $html->Implode( $id, $tagFilterOptions ) );
+		}
+
+		//$eligibleContent = $html->Implode( 0, $tagFilterOptions );
+
+		/**
+		 * TagFilter::Implode() writes br tags as `<br>` while WP normalizes to `<br />`.
+		 * Normalize `$eligibleContent` to match WP.
+		 *
+		 * @see wpautop()
+		 */
+		//$eligibleContent = \Easy_Plugins\Table_Of_Contents\String\force_balance_tags( $eligibleContent );
+	}
+
+	/**
 	 * Extract the posts content for headings.
 	 *
 	 * @access private
@@ -265,14 +400,15 @@ class ezTOC_Post {
 		/** @todo does this need to be used??? */
 		//self::$collision_collector = array();
 
-		$content = apply_filters( 'ez_toc_extract_headings_content', $content );
+		$content = apply_filters( 'ez_toc_extract_headings_content', wptexturize( $content ) );
 
-			// get all headings
-			// the html spec allows for a maximum of 6 heading depths
+		// get all headings
+		// the html spec allows for a maximum of 6 heading depths
 		if ( preg_match_all( '/(<h([1-6]{1})[^>]*>)(.*)<\/h\2>/msuU', $content, $matches, PREG_SET_ORDER ) ) {
 
 			$minimum = absint( ezTOC_Option::get( 'start' ) );
 
+			$this->removeHeadingsFromExcludedNodes( $matches );
 			$this->removeHeadings( $matches );
 			$this->excludeHeadings( $matches );
 			$this->removeEmptyHeadings( $matches );
@@ -281,13 +417,57 @@ class ezTOC_Post {
 
 				$this->alternateHeadings( $matches );
 				$this->headingIDs( $matches );
-				$this->hasTOCItems = TRUE;
+				$this->hasTOCItems = true;
 
 			} else {
 
 				return array();
 			}
 
+		}
+
+		return $matches;
+	}
+
+	/**
+	 * Whether or not the string is in one of the excluded nodes.
+	 *
+	 * @since 2.0
+	 *
+	 * @param string $string
+	 *
+	 * @return bool
+	 */
+	private function inExcludedNode( $string ) {
+
+		foreach ( $this->excludedNodes as $node ) {
+
+			if ( false !== strpos( $node, $string ) ) {
+
+				return true;
+			}
+		}
+
+		return false;
+	}
+
+	/**
+	 * Remove headings that are in excluded nodes.
+	 *
+	 * @since 2.0
+	 *
+	 * @param array $matches
+	 *
+	 * @return array
+	 */
+	private function removeHeadingsFromExcludedNodes( &$matches ) {
+
+		foreach ( $matches as $i => $match ) {
+
+			if ( $this->inExcludedNode( $match[3] ) ) {
+
+				unset( $matches[ $i ] );
+			}
 		}
 
 		return $matches;
@@ -303,7 +483,7 @@ class ezTOC_Post {
 	 */
 	private function getHeadingLevels() {
 
-		$levels = get_post_meta( $this->post->ID, '_ez-toc-heading-levels', TRUE );
+		$levels = get_post_meta( $this->post->ID, '_ez-toc-heading-levels', true );
 
 		if ( ! is_array( $levels ) ) {
 
@@ -369,7 +549,7 @@ class ezTOC_Post {
 	 */
 	private function excludeHeadings( &$matches ) {
 
-		$exclude = get_post_meta( $this->post->ID, '_ez-toc-exclude', TRUE );
+		$exclude = get_post_meta( $this->post->ID, '_ez-toc-exclude', true );
 
 		if ( empty( $exclude ) ) {
 
@@ -390,8 +570,8 @@ class ezTOC_Post {
 					// escape some regular expression characters
 					// others: http://www.php.net/manual/en/regexp.reference.meta.php
 					$excluded_headings[ $j ] = str_replace(
-						array( '\*' ),
-						array( '.*' ),
+						array( '\*', '/', '%' ),
+						array( '.*', '\/', '\%' ),
 						trim( $excluded_headings[ $j ] )
 					);
 				}
@@ -401,7 +581,7 @@ class ezTOC_Post {
 
 				for ( $i = 0; $i < $count; $i++ ) {
 
-					$found = FALSE;
+					$found = false;
 
 					for ( $j = 0; $j < $excluded_count; $j++ ) {
 
@@ -414,14 +594,14 @@ class ezTOC_Post {
 						);
 
 						$against = html_entity_decode(
-							wptexturize( strip_tags( $matches[ $i ][0] ) ),
+							wptexturize( strip_tags( str_replace( array( "\r", "\n" ), ' ', $matches[ $i ][0] ) ) ),
 							ENT_NOQUOTES,
 							get_option( 'blog_charset' )
 						);
 
 						if ( @preg_match( '/^' . $pattern . '$/imU', $against ) ) {
 
-							$found = TRUE;
+							$found = true;
 							break;
 						}
 					}
@@ -455,13 +635,13 @@ class ezTOC_Post {
 	 */
 	private function getAlternateHeadings() {
 
-		$value = get_post_meta( $this->post->ID, '_ez-toc-alttext', TRUE );
+		$alternates = array();
+		$value      = get_post_meta( $this->post->ID, '_ez-toc-alttext', true );
 
 		if ( $value ) {
 
-			$alternates = array();
-			$headings   = preg_split( '/\r\n|[\r\n]/', $value );
-			$count      = count( $headings );
+			$headings = preg_split( '/\r\n|[\r\n]/', $value );
+			$count    = count( $headings );
 
 			if ( $headings ) {
 
@@ -477,10 +657,9 @@ class ezTOC_Post {
 
 			}
 
-			$this->alternateHeadings = $alternates;
 		}
 
-		return $this->alternateHeadings;
+		return $alternates;
 	}
 
 	/**
@@ -506,17 +685,37 @@ class ezTOC_Post {
 
 				foreach ( $alt_headings as $original_heading => $alt_heading ) {
 
-					$original_heading = preg_quote( $original_heading );
+					// Cleanup and texturize so alt heading can match heading in post content.
+					$original_heading = wptexturize( trim( $original_heading ) );
 
-					// escape some regular expression characters
-					// others: http://www.php.net/manual/en/regexp.reference.meta.php
+					// Deal with special characters such as non-breakable space.
 					$original_heading = str_replace(
-						array( '\*' ),
-						array( '.*' ),
-						trim( $original_heading )
+						array( "\xc2\xa0" ),
+						array( ' ' ),
+						$original_heading
 					);
 
-					if ( @preg_match( '/^' . $original_heading . '$/imU', strip_tags( $matches[ $i ][0] ) ) ) {
+					// Escape for regular expression.
+					$original_heading = preg_quote( $original_heading );
+
+					// Escape for regular expression some other characters: http://www.php.net/manual/en/regexp.reference.meta.php
+					$original_heading = str_replace(
+						array( '\*', '/', '%' ),
+						array( '.*', '\/', '\%' ),
+						$original_heading
+					);
+
+					// Cleanup subject so alt heading can match heading in post content.
+					$subject = strip_tags( $matches[ $i ][0] );
+
+					// Deal with special characters such as non-breakable space.
+					$subject = str_replace(
+						array( "\xc2\xa0" ),
+						array( ' ' ),
+						$subject
+					);
+
+					if ( @preg_match( '/^' . $original_heading . '$/imU', $subject ) ) {
 
 						$matches[ $i ]['alternate'] = $alt_heading;
 					}
@@ -563,7 +762,7 @@ class ezTOC_Post {
 	 */
 	private function generateHeadingIDFromTitle( $heading ) {
 
-		$return = FALSE;
+		$return = false;
 
 		if ( $heading ) {
 
@@ -645,7 +844,7 @@ class ezTOC_Post {
 
 		for ( $i = 0; $i < $count; $i ++ ) {
 
-			if ( trim( strip_tags( $matches[ $i ][0] ) ) != FALSE ) {
+			if ( trim( strip_tags( $matches[ $i ][0] ) ) != false ) {
 
 				$new_matches[] = $matches[ $i ];
 			}
@@ -684,7 +883,7 @@ class ezTOC_Post {
 	 *
 	 * @return array
 	 */
-	public function getHeadings( $page = NULL ) {
+	public function getHeadings( $page = null ) {
 
 		$headings = array();
 
@@ -711,7 +910,7 @@ class ezTOC_Post {
 	 *
 	 * @return array
 	 */
-	public function getHeadingsWithAnchors( $page = NULL ) {
+	public function getHeadingsWithAnchors( $page = null ) {
 
 		$headings = array();
 
@@ -734,8 +933,8 @@ class ezTOC_Post {
 						'</h' . $matches[ $i ][2] . '>'   // end of heading
 					),
 					array(
-						$matches[ $i ][1] . '<span class="ez-toc-section" id="' . $anchor . '">',
-						'</span></h' . $matches[ $i ][2] . '>'
+						$matches[ $i ][1],
+						'<span class="ez-toc-section" id="' . $anchor . '"></span></h' . $matches[ $i ][2] . '>'
 					),
 					$matches[ $i ][0]
 				);
@@ -764,7 +963,7 @@ class ezTOC_Post {
 				$html .= $this->createTOC( $page, $attribute['headings'] );
 			}
 
-			$html  = '<ul class="ez-toc-list">' . $html . '</ul>';
+			$html  = '<ul class="ez-toc-list ez-toc-list-level-1">' . $html . '</ul>';
 		}
 
 		return $html;
@@ -872,12 +1071,12 @@ class ezTOC_Post {
 
 				$toc_title = ezTOC_Option::get( 'heading_text' );
 
-				if ( strpos( $toc_title, '%PAGE_TITLE%' ) !== FALSE ) {
+				if ( strpos( $toc_title, '%PAGE_TITLE%' ) !== false ) {
 
 					$toc_title = str_replace( '%PAGE_TITLE%', get_the_title(), $toc_title );
 				}
 
-				if ( strpos( $toc_title, '%PAGE_NAME%' ) !== FALSE ) {
+				if ( strpos( $toc_title, '%PAGE_NAME%' ) !== false ) {
 
 					$toc_title = str_replace( '%PAGE_NAME%', get_the_title(), $toc_title );
 				}
@@ -949,7 +1148,7 @@ class ezTOC_Post {
 
 			$current_depth      = 100;    // headings can't be larger than h6 but 100 as a default to be sure
 			$numbered_items     = array();
-			$numbered_items_min = NULL;
+			$numbered_items_min = null;
 
 			// reset the internal collision collection
 			/** @todo does this need to be used??? */
@@ -967,9 +1166,12 @@ class ezTOC_Post {
 
 			for ( $i = 0; $i < count( $matches ); $i ++ ) {
 
+				$level = $matches[ $i ][2];
+				$count = $i + 1;
+
 				if ( $current_depth == (int) $matches[ $i ][2] ) {
 
-					$html .= '<li>';
+					$html .= '<li class="ez-toc-page-' . $page . ' ez-toc-heading-level-' . $current_depth . '">';
 				}
 
 				// start lists
@@ -978,14 +1180,14 @@ class ezTOC_Post {
 					for ( $current_depth; $current_depth < (int) $matches[ $i ][2]; $current_depth++ ) {
 
 						$numbered_items[ $current_depth + 1 ] = 0;
-						$html .= '<ul><li>';
+						$html .= '<ul class="ez-toc-list-level-' . $level . '"><li class="ez-toc-heading-level-' . $level . '">';
 					}
 				}
 
 				$title = isset( $matches[ $i ]['alternate'] ) ? $matches[ $i ]['alternate'] : $matches[ $i ][0];
 				$title = strip_tags( apply_filters( 'ez_toc_title', $title ), apply_filters( 'ez_toc_title_allowable_tags', '' ) );
 
-				$html .= $this->createTOCItemAnchor( $page, $matches[ $i ]['id'], $title );
+				$html .= $this->createTOCItemAnchor( $page, $matches[ $i ]['id'], $title, $count );
 
 				// end lists
 				if ( $i != count( $matches ) - 1 ) {
@@ -1022,12 +1224,14 @@ class ezTOC_Post {
 
 			for ( $i = 0; $i < count( $matches ); $i++ ) {
 
+				$count = $i + 1;
+
 				$title = isset( $matches[ $i ]['alternate'] ) ? $matches[ $i ]['alternate'] : $matches[ $i ][0];
 				$title = strip_tags( apply_filters( 'ez_toc_title', $title ), apply_filters( 'ez_toc_title_allowable_tags', '' ) );
 
-				$html .= '<li>';
+				$html .= '<li class="ez-toc-page-' . $page . '">';
 
-				$html .= $this->createTOCItemAnchor( $page, $matches[ $i ]['id'], $title );
+				$html .= $this->createTOCItemAnchor( $page, $matches[ $i ]['id'], $title, $count );
 
 				$html .= '</li>';
 			}
@@ -1043,13 +1247,14 @@ class ezTOC_Post {
 	 * @param int    $page
 	 * @param string $id
 	 * @param string $title
+	 * @param int    $count
 	 *
 	 * @return string
 	 */
-	private function createTOCItemAnchor( $page, $id, $title ) {
+	private function createTOCItemAnchor( $page, $id, $title, $count ) {
 
 		return sprintf(
-			'<a href="%1$s" title="%2$s">' . $title . '</a>',
+			'<a class="ez-toc-link ez-toc-heading-' . $count . '" href="%1$s" title="%2$s">' . $title . '</a>',
 			esc_url( $this->createTOCItemURL( $id, $page ) ),
 			esc_attr( strip_tags( $title ) )
 		);
